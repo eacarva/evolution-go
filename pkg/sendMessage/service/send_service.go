@@ -1904,21 +1904,37 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 		}
 		interactive.Header = s.buttonHeader(client, data)
 
-		msg = &waE2E.Message{InteractiveMessage: interactive}
+		// Mesmo formato do carrossel (que chega no iPhone): sem nós <biz>/<bot> e com
+		// DeviceListMetadata. Com <bot biz_bot="1"/> o servidor aceitava, mas o iPhone de um
+		// destinatário comum não mostrava nada. Se o servidor recusar, reenvia com os nós do #74.
+		msg = &waE2E.Message{
+			InteractiveMessage: interactive,
+			MessageContextInfo: &waE2E.MessageContextInfo{DeviceListMetadata: &waE2E.DeviceListMetadata{}},
+		}
 		msgType = "InteractiveMessage"
-		bizNodes = nativeFlowBizNodes("mixed", "9", data.Number)
+	}
+
+	sendData := &SendDataStruct{
+		Number:       data.Number,
+		Delay:        data.Delay,
+		MentionAll:   data.MentionAll,
+		MentionedJID: data.MentionedJID,
+		FormatJid:    data.FormatJid,
+		Quoted:       data.Quoted,
+	}
+	if bizNodes != nil {
+		sendData.AdditionalNodes = &bizNodes
 	}
 
 	// Route through centralized SendMessage for ContextInfo, webhooks, quotes, mentions.
-	message, err := s.SendMessage(instance, msg, msgType, &SendDataStruct{
-		Number:          data.Number,
-		Delay:           data.Delay,
-		MentionAll:      data.MentionAll,
-		MentionedJID:    data.MentionedJID,
-		FormatJid:       data.FormatJid,
-		Quoted:          data.Quoted,
-		AdditionalNodes: &bizNodes,
-	})
+	message, err := s.SendMessage(instance, msg, msgType, sendData)
+	if err != nil && !hasPix {
+		s.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Button message refused without biz nodes (%v), retrying with native_flow mixed v9", instance.Id, err)
+		fallbackNodes := nativeFlowBizNodes("mixed", "9", data.Number)
+		sendData.AdditionalNodes = &fallbackNodes
+		sendData.Delay = 0
+		message, err = s.SendMessage(instance, msg, msgType, sendData)
+	}
 	if err != nil {
 		s.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Error sending button message: %v", instance.Id, err)
 		return nil, err
