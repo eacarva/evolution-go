@@ -32,9 +32,11 @@ Fork do `evolution-foundation/evolution-go`, deployado no Easypanel a partir do 
 
 ## Teste local (sem deploy)
 
-- Postgres em container `evogo-pg` (porta 5433), `.env` local (gitignored), `make dev` com log em
-  `logs/local.log`. Manager em `http://localhost:8080/manager`. Instância "local" conectada como
-  aparelho vinculado do mesmo número Business.
+- Apagado em 11/11/2026 para não ocupar o Mac. Para recriar: Postgres em container
+  (`docker run -d --name evogo-pg -e POSTGRES_PASSWORD=root -p 5433:5432 postgres:16-alpine` e criar
+  `evogo_auth`/`evogo_users`), `.env` a partir do `.env.example` apontando para a porta 5433,
+  `make dev`, ativar licença em `/license/register` (+ `/license/activate?code=...`) e ler o QR no
+  manager (`http://localhost:8080/manager`). Ao terminar, `DELETE /instance/logout` antes de apagar.
 - Um envio chegou no aparelho quando o log tem `Receipt ... from 248022114033783...` (o destinatário);
   recibo não garante que apareceu na tela.
 
