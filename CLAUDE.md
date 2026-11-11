@@ -21,13 +21,8 @@ Fork do `evolution-foundation/evolution-go`, deployado no Easypanel a partir do 
 
 ## Pendências / atenção
 
-- **`go.mod`/`go.sum` NÃO foram atualizados** (o ambiente anterior não tinha acesso ao proxy de
-  módulos Go). Hoje o `Dockerfile` roda `go get go.mau.fi/whatsmeow@${WHATSMEOW_REF} && go mod tidy`
-  antes do build. Primeira tarefa sugerida: rodar localmente
-  `go get go.mau.fi/whatsmeow@c88388f983b4 && go mod tidy && go build ./...`, commitar `go.mod`/`go.sum`
-  e remover esse passo do Dockerfile.
-- **Nada foi compilado nem testado localmente** depois das mudanças — rodar `go build ./...` e
-  `go test ./...`.
+- ~~`go.mod`/`go.sum` desatualizados~~ — resolvido: whatsmeow `c88388f983b4` pinado no `go.mod`,
+  passo `go get` removido do `Dockerfile`. `go build ./...` e `go test ./...` passam localmente.
 - Validar botões no aparelho (reply 1/3, CTA copy/url/call, agrupados, Pix, carrosséis).
   O fix de referência foi testado com número WhatsApp Business.
 - `/send/list`: WhatsApp recusa listas vindas de dispositivo vinculado (405/479). O fork de

@@ -14,12 +14,6 @@ RUN go mod download
 # Copiar o restante do código
 COPY . .
 
-# Atualiza o whatsmeow para um commit recente (o pinado em go.mod estava de jun/2026
-# e o WhatsApp passou a recusar o handshake com 405 "client outdated").
-# Para atualizar de novo, troque o hash abaixo pelo commit mais novo de github.com/tulir/whatsmeow.
-ARG WHATSMEOW_REF=c88388f983b4
-RUN go get go.mau.fi/whatsmeow@${WHATSMEOW_REF} && go mod tidy
-
 ARG VERSION=dev
 RUN CGO_ENABLED=1 go build -ldflags "-X main.version=${VERSION}" -o server ./cmd/evolution-go
 
