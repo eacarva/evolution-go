@@ -18,6 +18,12 @@ Fork do `evolution-foundation/evolution-go`, deployado no Easypanel a partir do 
    reply e CTA viram `InteractiveMessage` puro com `<biz><interactive type="native_flow" v="1">
    <native_flow name="mixed" v="9"/></interactive></biz>` + `<bot biz_bot="1"/>`. Pix inalterado.
    Carrossel não manda mais título/subtítulo vazios (`carouselCardHeader`).
+4. **Botões davam 200 mas não chegavam no iPhone** (remetente Business, destinatário comum; log mostrava
+   recibo só dos aparelhos do remetente). Mesmo problema das issues #59/#71 do repo oficial.
+   Reply/CTA agora mandam o `<biz>` completo de `tulir/whatsmeow#1235` (não mergeado):
+   attrs `actual_actors`/`host_storage`/`privacy_mode_ts` + `<quality_control>`, sem `<bot>`
+   (`interactiveBizNodes`). Lista virou `ListMessage` direto, sem wrapper/`<bot>`, e o whatsmeow
+   anexa o `<biz><list/>` (formato da issue #204). Carrossel funciona e não foi mexido.
 
 ## Pendências / atenção
 
@@ -25,8 +31,9 @@ Fork do `evolution-foundation/evolution-go`, deployado no Easypanel a partir do 
   passo `go get` removido do `Dockerfile`. `go build ./...` e `go test ./...` passam localmente.
 - Validar botões no aparelho (reply 1/3, CTA copy/url/call, agrupados, Pix, carrosséis).
   O fix de referência foi testado com número WhatsApp Business.
-- `/send/list`: WhatsApp recusa listas vindas de dispositivo vinculado (405/479). O fork de
-  referência converte lista em botões reply como fallback — avaliar portar.
+- Validar no iPhone os botões e a lista com o formato do item 4. Se a lista falhar, a #204 cita
+  `<list type="product_list" v="2"/>`; outra saída é o fallback do fork de referência (lista vira
+  botões reply).
 - O servidor do Easypanel ficou sem disco durante um build; rodar `docker builder prune -af`
   se acontecer de novo.
 - Rotacionar `GLOBAL_API_KEY` e senha do Postgres (vazaram num log de build).

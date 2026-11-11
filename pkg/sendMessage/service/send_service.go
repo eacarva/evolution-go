@@ -5,6 +5,7 @@ import (
 	"context"
 	crypto_rand "crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1883,10 +1884,10 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 		msgType = "InteractiveMessage"
 		bizNodes = nativeFlowBizNodes("payment_info", "1", data.Number)
 	} else {
-		// Reply e CTA (copy/url/call): InteractiveMessage puro com native flow, anunciado como
-		// <native_flow v="9" name="mixed"/>. O ButtonsMessage legado e o native flow embrulhado em
-		// DocumentWithCaptionMessage passaram a ser recusados pelo servidor (405/473).
-		// Port de lucasgiovannibr/evolution-go#74.
+		// Reply e CTA (copy/url/call): InteractiveMessage puro com native flow. O <biz> precisa do
+		// formato completo do cliente oficial (attrs + <quality_control>, sem <bot>); só com
+		// <native_flow name="mixed"/> o servidor aceita mas o aparelho não mostra nada.
+		// Formato de tulir/whatsmeow#1235 (ainda não mergeado).
 		body := data.Description
 		if data.Title != "" {
 			body = "*" + data.Title + "*\n\n" + data.Description
@@ -1904,37 +1905,21 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 		}
 		interactive.Header = s.buttonHeader(client, data)
 
-		// Mesmo formato do carrossel (que chega no iPhone): sem nós <biz>/<bot> e com
-		// DeviceListMetadata. Com <bot biz_bot="1"/> o servidor aceitava, mas o iPhone de um
-		// destinatário comum não mostrava nada. Se o servidor recusar, reenvia com os nós do #74.
-		msg = &waE2E.Message{
-			InteractiveMessage: interactive,
-			MessageContextInfo: &waE2E.MessageContextInfo{DeviceListMetadata: &waE2E.DeviceListMetadata{}},
-		}
+		msg = &waE2E.Message{InteractiveMessage: interactive}
 		msgType = "InteractiveMessage"
-	}
-
-	sendData := &SendDataStruct{
-		Number:       data.Number,
-		Delay:        data.Delay,
-		MentionAll:   data.MentionAll,
-		MentionedJID: data.MentionedJID,
-		FormatJid:    data.FormatJid,
-		Quoted:       data.Quoted,
-	}
-	if bizNodes != nil {
-		sendData.AdditionalNodes = &bizNodes
+		bizNodes = interactiveBizNodes()
 	}
 
 	// Route through centralized SendMessage for ContextInfo, webhooks, quotes, mentions.
-	message, err := s.SendMessage(instance, msg, msgType, sendData)
-	if err != nil && !hasPix {
-		s.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Button message refused without biz nodes (%v), retrying with native_flow mixed v9", instance.Id, err)
-		fallbackNodes := nativeFlowBizNodes("mixed", "9", data.Number)
-		sendData.AdditionalNodes = &fallbackNodes
-		sendData.Delay = 0
-		message, err = s.SendMessage(instance, msg, msgType, sendData)
-	}
+	message, err := s.SendMessage(instance, msg, msgType, &SendDataStruct{
+		Number:          data.Number,
+		Delay:           data.Delay,
+		MentionAll:      data.MentionAll,
+		MentionedJID:    data.MentionedJID,
+		FormatJid:       data.FormatJid,
+		Quoted:          data.Quoted,
+		AdditionalNodes: &bizNodes,
+	})
 	if err != nil {
 		s.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Error sending button message: %v", instance.Id, err)
 		return nil, err
@@ -2157,50 +2142,26 @@ func (s *sendService) SendList(data *ListStruct, instance *instance_model.Instan
 		Sections:    sections,
 	}
 
-	// Wrap ListMessage in DocumentWithCaptionMessage (Baileys PR #36) so modern WhatsApp renders it.
-	// MessageSecret (32 random bytes) is required for iOS rendering.
+	// ListMessage direto, sem DocumentWithCaptionMessage nem <bot>: com a lista no topo o próprio
+	// whatsmeow anexa <biz><list v="2" type="single_select"/></biz>. Formato relatado como
+	// funcionando em evolution-foundation/evolution-go#204.
 	listMsgSecret := make([]byte, 32)
 	_, _ = crypto_rand.Read(listMsgSecret)
 
 	msg := &waE2E.Message{
-		DocumentWithCaptionMessage: &waE2E.FutureProofMessage{
-			Message: &waE2E.Message{
-				ListMessage: listMessage,
-			},
-		},
+		ListMessage: listMessage,
 		MessageContextInfo: &waE2E.MessageContextInfo{
 			MessageSecret: listMsgSecret,
 		},
 	}
 
-	// Build biz <list> node — required for mobile rendering of modern lists.
-	listBizNodes := []waBinary.Node{
-		{
-			Tag: "biz",
-			Content: []waBinary.Node{{
-				Tag: "list",
-				Attrs: waBinary.Attrs{
-					"v":    "2",
-					"type": "single_select",
-				},
-			}},
-		},
-	}
-	if !strings.Contains(data.Number, "@g.us") {
-		listBizNodes = append(listBizNodes, waBinary.Node{
-			Tag:   "bot",
-			Attrs: waBinary.Attrs{"biz_bot": "1"},
-		})
-	}
-
 	message, err := s.SendMessage(instance, msg, "ListMessage", &SendDataStruct{
-		Number:          data.Number,
-		Delay:           data.Delay,
-		MentionAll:      data.MentionAll,
-		MentionedJID:    data.MentionedJID,
-		FormatJid:       data.FormatJid,
-		Quoted:          data.Quoted,
-		AdditionalNodes: &listBizNodes,
+		Number:       data.Number,
+		Delay:        data.Delay,
+		MentionAll:   data.MentionAll,
+		MentionedJID: data.MentionedJID,
+		FormatJid:    data.FormatJid,
+		Quoted:       data.Quoted,
 	})
 
 	if err != nil {
@@ -3238,6 +3199,40 @@ func NewSendService(
 		config:           config,
 		loggerWrapper:    loggerWrapper,
 	}
+}
+
+// interactiveBizNodes é o <biz> dos botões reply/CTA no formato observado no cliente oficial
+// (tulir/whatsmeow#1235): attrs actual_actors/host_storage/privacy_mode_ts e <quality_control>
+// com decision_id aleatório. Sem o <bot biz_bot="1"/>.
+func interactiveBizNodes() []waBinary.Node {
+	decisionID := make([]byte, 20)
+	_, _ = crypto_rand.Read(decisionID)
+	return []waBinary.Node{{
+		Tag: "biz",
+		Attrs: waBinary.Attrs{
+			"actual_actors":   "2",
+			"host_storage":    "2",
+			"privacy_mode_ts": strconv.FormatInt(time.Now().Unix(), 10),
+		},
+		Content: []waBinary.Node{
+			{
+				Tag:   "interactive",
+				Attrs: waBinary.Attrs{"type": "native_flow", "v": "1"},
+				Content: []waBinary.Node{{
+					Tag:   "native_flow",
+					Attrs: waBinary.Attrs{"v": "9", "name": "mixed"},
+				}},
+			},
+			{
+				Tag:   "quality_control",
+				Attrs: waBinary.Attrs{"decision_id": hex.EncodeToString(decisionID), "source_type": "third_party"},
+				Content: []waBinary.Node{{
+					Tag:   "decision_source",
+					Attrs: waBinary.Attrs{"value": "df"},
+				}},
+			},
+		},
+	}}
 }
 
 // nativeFlowBizNodes monta o nó <biz> que anuncia a mensagem native flow ao servidor, mais o
