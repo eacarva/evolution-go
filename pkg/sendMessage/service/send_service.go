@@ -1772,6 +1772,15 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 		}
 	}
 
+	// O iPhone descarta a mensagem native flow inteira quando tem cta_copy (testado com várias
+	// variações do <biz>), mas mostra o mesmo botão dentro de um carrossel. Com copy, vai como
+	// carrossel de 1 card.
+	for _, v := range data.Buttons {
+		if v.Type == "copy" {
+			return s.SendCarousel(buttonAsCarousel(data), instance)
+		}
+	}
+
 	buttons := []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{}
 
 	for _, v := range data.Buttons {
@@ -1789,11 +1798,12 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 			if copyCode == "" {
 				copyCode = v.Id
 			}
-			copyId := v.Id
-			if copyId == "" {
-				copyId = "copy_" + strconv.FormatInt(time.Now().UnixNano(), 10)
+			// Igual ao carrossel: sem "id" inventado (o iPhone não mostrava o botão com ele).
+			copyParams := map[string]string{"display_text": v.DisplayText, "copy_code": copyCode}
+			if v.Id != "" {
+				copyParams["id"] = v.Id
 			}
-			jsonBytes, _ := json.Marshal(map[string]string{"display_text": v.DisplayText, "id": copyId, "copy_code": copyCode})
+			jsonBytes, _ := json.Marshal(copyParams)
 			paramsJSON = proto.String(string(jsonBytes))
 		case "url":
 			name = proto.String("cta_url")
@@ -1882,7 +1892,7 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 			},
 		}
 		msgType = "InteractiveMessage"
-		bizNodes = nativeFlowBizNodes("payment_info", "1", data.Number)
+		bizNodes = interactiveBizNodes("payment_info")
 	} else {
 		// Reply e CTA (copy/url/call): InteractiveMessage puro com native flow. O <biz> precisa do
 		// formato completo do cliente oficial (attrs + <quality_control>, sem <bot>); só com
@@ -1907,7 +1917,7 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 
 		msg = &waE2E.Message{InteractiveMessage: interactive}
 		msgType = "InteractiveMessage"
-		bizNodes = interactiveBizNodes()
+		bizNodes = interactiveBizNodes("")
 	}
 
 	// Route through centralized SendMessage for ContextInfo, webhooks, quotes, mentions.
@@ -2028,7 +2038,7 @@ func sectionsToString(data *ListStruct) (string, error) {
 
 	type listSection struct {
 		Title          string `json:"title"`
-		HighlightLabel string `json:"highlight_label"`
+		HighlightLabel string `json:"highlight_label,omitempty"` // string vazia faz o iPhone descartar
 		Rows           []row  `json:"rows"`
 	}
 
@@ -2095,82 +2105,61 @@ func sectionsToString(data *ListStruct) (string, error) {
 }
 
 func (s *sendService) SendList(data *ListStruct, instance *instance_model.Instance) (*MessageSendStruct, error) {
-	// Legacy ListMessage format - works on iOS, Android and Web
-	// Matching PAPI Node.js default (non-modern) path exactly
-
-	buttonText := data.ButtonText
-	if buttonText == "" {
-		buttonText = "Ver Menu"
-	}
-
-	// Build sections in legacy ListMessage format
-	var sections []*waE2E.ListMessage_Section
+	// O WhatsApp recusa ListMessage vindo de aparelho vinculado (405) e o iPhone não mostra a lista
+	// native flow "single_select". Os itens vão como botões reply, 3 por mensagem (como o fork
+	// lucasgiovannibr/evolution-go#74). Devolve a primeira mensagem.
+	var rows []Row
 	for _, sec := range data.Sections {
-		sectionTitle := sec.Title
-		if sectionTitle == "" {
-			sectionTitle = " "
-		}
-		var rows []*waE2E.ListMessage_Row
-		for i, r := range sec.Rows {
-			rowTitle := r.Title
-			if rowTitle == "" {
-				rowTitle = " "
+		rows = append(rows, sec.Rows...)
+	}
+	if len(rows) == 0 {
+		return nil, errors.New("a lista precisa de pelo menos um item")
+	}
+
+	var first *MessageSendStruct
+	for i := 0; i < len(rows); i += 3 {
+		var details strings.Builder
+		var buttons []Button
+		for j, r := range rows[i:min(i+3, len(rows))] {
+			id := r.RowId
+			if id == "" {
+				id = fmt.Sprintf("row_%d", i+j)
 			}
-			rowId := r.RowId
-			if rowId == "" {
-				rowId = fmt.Sprintf("row_%d_%d", i, len(rows))
+			buttons = append(buttons, Button{Type: "reply", DisplayText: r.Title, Id: id})
+			if r.Description != "" {
+				fmt.Fprintf(&details, "\n• *%s*: %s", r.Title, r.Description)
 			}
-			rows = append(rows, &waE2E.ListMessage_Row{
-				Title:       proto.String(rowTitle),
-				Description: proto.String(r.Description),
-				RowID:       proto.String(rowId),
-			})
 		}
-		sections = append(sections, &waE2E.ListMessage_Section{
-			Title: proto.String(sectionTitle),
-			Rows:  rows,
-		})
+
+		part := &ButtonStruct{
+			Number:       data.Number,
+			Footer:       data.FooterText,
+			Buttons:      buttons,
+			MentionedJID: data.MentionedJID,
+			MentionAll:   data.MentionAll,
+			FormatJid:    data.FormatJid,
+		}
+		if i == 0 {
+			part.Title = data.Title
+			part.Description = data.Description + details.String()
+			part.Delay = data.Delay
+			part.Quoted = data.Quoted
+		} else {
+			part.Description = "Mais opções:" + details.String()
+		}
+
+		message, err := s.SendButton(part, instance)
+		if err != nil {
+			s.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Error sending list: %v", instance.Id, err)
+			return nil, err
+		}
+		if first == nil {
+			first = message
+		}
 	}
 
-	listType := waE2E.ListMessage_SINGLE_SELECT
-	listMessage := &waE2E.ListMessage{
-		Title:       proto.String(data.Title),
-		Description: proto.String(data.Description),
-		ButtonText:  proto.String(buttonText),
-		FooterText:  proto.String(data.FooterText),
-		ListType:    &listType,
-		Sections:    sections,
-	}
-
-	// ListMessage direto, sem DocumentWithCaptionMessage nem <bot>: com a lista no topo o próprio
-	// whatsmeow anexa <biz><list v="2" type="single_select"/></biz>. Formato relatado como
-	// funcionando em evolution-foundation/evolution-go#204.
-	listMsgSecret := make([]byte, 32)
-	_, _ = crypto_rand.Read(listMsgSecret)
-
-	msg := &waE2E.Message{
-		ListMessage: listMessage,
-		MessageContextInfo: &waE2E.MessageContextInfo{
-			MessageSecret: listMsgSecret,
-		},
-	}
-
-	message, err := s.SendMessage(instance, msg, "ListMessage", &SendDataStruct{
-		Number:       data.Number,
-		Delay:        data.Delay,
-		MentionAll:   data.MentionAll,
-		MentionedJID: data.MentionedJID,
-		FormatJid:    data.FormatJid,
-		Quoted:       data.Quoted,
-	})
-
-	if err != nil {
-		s.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Error sending list: %v", instance.Id, err)
-		return nil, err
-	}
-
-	s.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] List sent to %s", instance.Id, data.Number)
-	return message, nil
+	s.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] List sent to %s as reply buttons", instance.Id, data.Number)
+	return first, nil
 }
 
 func (s *sendService) SendMessage(instance *instance_model.Instance, msg *waE2E.Message, messageType string, data *SendDataStruct) (*MessageSendStruct, error) {
@@ -3201,10 +3190,16 @@ func NewSendService(
 	}
 }
 
-// interactiveBizNodes é o <biz> dos botões reply/CTA no formato observado no cliente oficial
-// (tulir/whatsmeow#1235): attrs actual_actors/host_storage/privacy_mode_ts e <quality_control>
-// com decision_id aleatório. Sem o <bot biz_bot="1"/>.
-func interactiveBizNodes() []waBinary.Node {
+// interactiveBizNodes monta o <biz> no formato de tulir/whatsmeow#1235 (attrs actual_actors,
+// host_storage, privacy_mode_ts + <quality_control> com decision_id aleatório), sem <bot>.
+// Testado de conta Business para iPhone comum: reply, URL, call e Pix aparecem.
+// O formato da oxidezap/whatsapp-rust (com <bot>, privacy_mode_ts deslocado e quality_control
+// vazio) foi testado e nada chegou. flowName vazio usa "mixed" v9; Pix usa "payment_info" v1.
+func interactiveBizNodes(flowName string) []waBinary.Node {
+	flowVersion := "1"
+	if flowName == "" {
+		flowName, flowVersion = "mixed", "9"
+	}
 	decisionID := make([]byte, 20)
 	_, _ = crypto_rand.Read(decisionID)
 	return []waBinary.Node{{
@@ -3220,7 +3215,7 @@ func interactiveBizNodes() []waBinary.Node {
 				Attrs: waBinary.Attrs{"type": "native_flow", "v": "1"},
 				Content: []waBinary.Node{{
 					Tag:   "native_flow",
-					Attrs: waBinary.Attrs{"v": "9", "name": "mixed"},
+					Attrs: waBinary.Attrs{"v": flowVersion, "name": flowName},
 				}},
 			},
 			{
@@ -3235,24 +3230,35 @@ func interactiveBizNodes() []waBinary.Node {
 	}}
 }
 
-// nativeFlowBizNodes monta o nó <biz> que anuncia a mensagem native flow ao servidor, mais o
-// <bot biz_bot="1"/> exigido em conversas 1:1 (grupos não usam).
-func nativeFlowBizNodes(flowName, flowVersion, number string) []waBinary.Node {
-	nodes := []waBinary.Node{{
-		Tag: "biz",
-		Content: []waBinary.Node{{
-			Tag:   "interactive",
-			Attrs: waBinary.Attrs{"type": "native_flow", "v": "1"},
-			Content: []waBinary.Node{{
-				Tag:   "native_flow",
-				Attrs: waBinary.Attrs{"name": flowName, "v": flowVersion},
-			}},
-		}},
-	}}
-	if !strings.Contains(number, "@g.us") {
-		nodes = append(nodes, waBinary.Node{Tag: "bot", Attrs: waBinary.Attrs{"biz_bot": "1"}})
+// buttonAsCarousel monta um carrossel de 1 card com o conteúdo e os botões de uma mensagem de botões.
+// No carrossel, URL e telefone vão no campo Id do botão.
+func buttonAsCarousel(data *ButtonStruct) *CarouselStruct {
+	card := CarouselCardStruct{
+		Header: CarouselCardHeaderStruct{Title: data.Title, ImageUrl: data.ImageUrl, VideoUrl: data.VideoUrl},
+		Body:   CarouselCardBodyStruct{Text: data.Description},
+		Footer: data.Footer,
 	}
-	return nodes
+	for _, v := range data.Buttons {
+		b := CarouselButtonStruct{Type: v.Type, DisplayText: v.DisplayText, Id: v.Id, CopyCode: v.CopyCode}
+		switch v.Type {
+		case "url":
+			b.Id = v.URL
+		case "call":
+			b.Id = v.PhoneNumber
+		case "copy":
+			if b.CopyCode == "" {
+				b.CopyCode = v.Id
+			}
+		}
+		card.Buttons = append(card.Buttons, b)
+	}
+	return &CarouselStruct{
+		Number:    data.Number,
+		Delay:     data.Delay,
+		FormatJid: data.FormatJid,
+		Quoted:    data.Quoted,
+		Cards:     []CarouselCardStruct{card},
+	}
 }
 
 // downloadURL baixa uma URL de mídia para o header dos botões.
