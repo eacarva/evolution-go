@@ -1845,93 +1845,13 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 		})
 	}
 
-	templateId := strconv.FormatInt(time.Now().UnixNano()/1000000, 10)
-	messageParamsJSON := `{"from":"api","templateId":` + templateId + `}`
-
-	// MessageSecret (32 random bytes) — required for iOS to render interactive messages.
-	btnMsgSecret := make([]byte, 32)
-	_, _ = crypto_rand.Read(btnMsgSecret)
-
 	var msg *waE2E.Message
 	var msgType string
+	var bizNodes []waBinary.Node
 
-	if hasReply && !hasOtherTypes && !hasPix {
-		// Reply-only: native ButtonsMessage wrapped in DocumentWithCaptionMessage (Baileys PR #36).
-		var replyButtons []*waE2E.ButtonsMessage_Button
-		for _, v := range data.Buttons {
-			replyButtons = append(replyButtons, &waE2E.ButtonsMessage_Button{
-				ButtonID: proto.String(v.Id),
-				ButtonText: &waE2E.ButtonsMessage_Button_ButtonText{
-					DisplayText: proto.String(v.DisplayText),
-				},
-				Type: waE2E.ButtonsMessage_Button_RESPONSE.Enum(),
-			})
-		}
-
-		buttonsMsg := &waE2E.ButtonsMessage{
-			ContentText: proto.String(data.Description),
-			FooterText:  proto.String(data.Footer),
-			HeaderType:  waE2E.ButtonsMessage_EMPTY.Enum(),
-			Buttons:     replyButtons,
-		}
-
-		// Optional media header (image or video URL).
-		if data.ImageUrl != "" {
-			if resp, err := http.Get(data.ImageUrl); err == nil {
-				fileData, readErr := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if readErr == nil {
-					if uploaded, upErr := client.Upload(context.Background(), fileData, whatsmeow.MediaImage); upErr == nil {
-						buttonsMsg.HeaderType = waE2E.ButtonsMessage_IMAGE.Enum()
-						buttonsMsg.Header = &waE2E.ButtonsMessage_ImageMessage{
-							ImageMessage: &waE2E.ImageMessage{
-								URL:           proto.String(uploaded.URL),
-								DirectPath:    proto.String(uploaded.DirectPath),
-								MediaKey:      uploaded.MediaKey,
-								Mimetype:      proto.String("image/jpeg"),
-								FileEncSHA256: uploaded.FileEncSHA256,
-								FileSHA256:    uploaded.FileSHA256,
-								FileLength:    proto.Uint64(uint64(len(fileData))),
-							},
-						}
-					}
-				}
-			}
-		} else if data.VideoUrl != "" {
-			if resp, err := http.Get(data.VideoUrl); err == nil {
-				fileData, readErr := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if readErr == nil {
-					if uploaded, upErr := client.Upload(context.Background(), fileData, whatsmeow.MediaVideo); upErr == nil {
-						buttonsMsg.HeaderType = waE2E.ButtonsMessage_VIDEO.Enum()
-						buttonsMsg.Header = &waE2E.ButtonsMessage_VideoMessage{
-							VideoMessage: &waE2E.VideoMessage{
-								URL:           proto.String(uploaded.URL),
-								DirectPath:    proto.String(uploaded.DirectPath),
-								MediaKey:      uploaded.MediaKey,
-								Mimetype:      proto.String("video/mp4"),
-								FileEncSHA256: uploaded.FileEncSHA256,
-								FileSHA256:    uploaded.FileSHA256,
-								FileLength:    proto.Uint64(uint64(len(fileData))),
-							},
-						}
-					}
-				}
-			}
-		}
-
-		msg = &waE2E.Message{
-			DocumentWithCaptionMessage: &waE2E.FutureProofMessage{
-				Message: &waE2E.Message{
-					ButtonsMessage: buttonsMsg,
-				},
-			},
-			MessageContextInfo: &waE2E.MessageContextInfo{
-				MessageSecret: btnMsgSecret,
-			},
-		}
-		msgType = "ButtonsMessage"
-	} else if hasPix {
+	if hasPix {
+		btnMsgSecret := make([]byte, 32)
+		_, _ = crypto_rand.Read(btnMsgSecret)
 		// Pix: NativeFlowMessage wrapped in DocumentWithCaptionMessage.
 		paymentMsgParams := `{"native_flow_name":"order_details","version":1}`
 
@@ -1961,103 +1881,32 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 			},
 		}
 		msgType = "InteractiveMessage"
+		bizNodes = nativeFlowBizNodes("payment_info", "1", data.Number)
 	} else {
-		// Mixed CTA buttons (url/copy/call): NativeFlowMessage wrapped in DocumentWithCaptionMessage.
-		body := func() string {
-			t := "*" + data.Title + "*"
-			if data.Description != "" {
-				t += "\n\n" + data.Description + "\n"
-			}
-			return t
-		}()
-
-		msg = &waE2E.Message{
-			DocumentWithCaptionMessage: &waE2E.FutureProofMessage{
-				Message: &waE2E.Message{
-					InteractiveMessage: &waE2E.InteractiveMessage{
-						Body: &waE2E.InteractiveMessage_Body{
-							Text: &body,
-						},
-						Footer: &waE2E.InteractiveMessage_Footer{
-							Text: &data.Footer,
-						},
-						InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
-							NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
-								Buttons:           buttons,
-								MessageParamsJSON: &messageParamsJSON,
-								MessageVersion:    proto.Int32(1),
-							},
-						},
-					},
-				},
-			},
-			MessageContextInfo: &waE2E.MessageContextInfo{
-				MessageSecret: btnMsgSecret,
-			},
+		// Reply e CTA (copy/url/call): InteractiveMessage puro com native flow, anunciado como
+		// <native_flow v="9" name="mixed"/>. O ButtonsMessage legado e o native flow embrulhado em
+		// DocumentWithCaptionMessage passaram a ser recusados pelo servidor (405/473).
+		// Port de lucasgiovannibr/evolution-go#74.
+		body := data.Description
+		if data.Title != "" {
+			body = "*" + data.Title + "*\n\n" + data.Description
 		}
+
+		interactive := &waE2E.InteractiveMessage{
+			Body: &waE2E.InteractiveMessage_Body{Text: proto.String(body)},
+			InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+				NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{Buttons: buttons},
+			},
+			ContextInfo: &waE2E.ContextInfo{},
+		}
+		if data.Footer != "" {
+			interactive.Footer = &waE2E.InteractiveMessage_Footer{Text: proto.String(data.Footer)}
+		}
+		interactive.Header = s.buttonHeader(client, data)
+
+		msg = &waE2E.Message{InteractiveMessage: interactive}
 		msgType = "InteractiveMessage"
-	}
-
-	// Build biz/bot nodes injected directly in the XMPP stanza — required for mobile rendering.
-	// Reply-only buttons get <biz><buttons/></biz>; CTA/Pix get <biz><interactive type="native_flow" v="1"><native_flow name="X"/></interactive></biz>.
-	// The <bot biz_bot="1"/> node is required for 1:1 chats (skipped on groups).
-	var bizInteractiveContent waBinary.Node
-	if hasReply && !hasOtherTypes && !hasPix {
-		bizInteractiveContent = waBinary.Node{
-			Tag: "interactive",
-			Attrs: waBinary.Attrs{
-				"type": "native_flow",
-				"v":    "1",
-			},
-			Content: []waBinary.Node{{
-				Tag: "native_flow",
-				Attrs: waBinary.Attrs{
-					"name": "quick_reply",
-				},
-			}},
-		}
-	} else if hasPix {
-		bizInteractiveContent = waBinary.Node{
-			Tag: "interactive",
-			Attrs: waBinary.Attrs{
-				"type": "native_flow",
-				"v":    "1",
-			},
-			Content: []waBinary.Node{{
-				Tag: "native_flow",
-				Attrs: waBinary.Attrs{
-					"name": "payment_info",
-				},
-			}},
-		}
-	} else {
-		// Mixed CTA buttons (url/copy/call) — name="mixed" is the WhatsApp convention.
-		bizInteractiveContent = waBinary.Node{
-			Tag: "interactive",
-			Attrs: waBinary.Attrs{
-				"type": "native_flow",
-				"v":    "1",
-			},
-			Content: []waBinary.Node{{
-				Tag: "native_flow",
-				Attrs: waBinary.Attrs{
-					"name": "mixed",
-				},
-			}},
-		}
-	}
-
-	bizNodes := []waBinary.Node{
-		{
-			Tag:     "biz",
-			Content: []waBinary.Node{bizInteractiveContent},
-		},
-	}
-	if !strings.Contains(data.Number, "@g.us") {
-		bizNodes = append(bizNodes, waBinary.Node{
-			Tag:   "bot",
-			Attrs: waBinary.Attrs{"biz_bot": "1"},
-		})
+		bizNodes = nativeFlowBizNodes("mixed", "9", data.Number)
 	}
 
 	// Route through centralized SendMessage for ContextInfo, webhooks, quotes, mentions.
@@ -2932,11 +2781,7 @@ func (s *sendService) SendCarousel(data *CarouselStruct, instance *instance_mode
 			Body: &waE2E.InteractiveMessage_Body{
 				Text: proto.String(card.Body.Text),
 			},
-			Header: &waE2E.InteractiveMessage_Header{
-				Title:              proto.String(card.Header.Title),
-				Subtitle:           proto.String(card.Header.Subtitle),
-				HasMediaAttachment: proto.Bool(false),
-			},
+			Header: carouselCardHeader(card.Header),
 		}
 
 		// Add media to header if URL provided
@@ -3377,4 +3222,102 @@ func NewSendService(
 		config:           config,
 		loggerWrapper:    loggerWrapper,
 	}
+}
+
+// nativeFlowBizNodes monta o nó <biz> que anuncia a mensagem native flow ao servidor, mais o
+// <bot biz_bot="1"/> exigido em conversas 1:1 (grupos não usam).
+func nativeFlowBizNodes(flowName, flowVersion, number string) []waBinary.Node {
+	nodes := []waBinary.Node{{
+		Tag: "biz",
+		Content: []waBinary.Node{{
+			Tag:   "interactive",
+			Attrs: waBinary.Attrs{"type": "native_flow", "v": "1"},
+			Content: []waBinary.Node{{
+				Tag:   "native_flow",
+				Attrs: waBinary.Attrs{"name": flowName, "v": flowVersion},
+			}},
+		}},
+	}}
+	if !strings.Contains(number, "@g.us") {
+		nodes = append(nodes, waBinary.Node{Tag: "bot", Attrs: waBinary.Attrs{"biz_bot": "1"}})
+	}
+	return nodes
+}
+
+// downloadURL baixa uma URL de mídia para o header dos botões.
+func downloadURL(url string) ([]byte, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// buttonHeader sobe a imagem ou vídeo opcional do header. Se falhar, segue sem header.
+func (s *sendService) buttonHeader(client *whatsmeow.Client, data *ButtonStruct) *waE2E.InteractiveMessage_Header {
+	switch {
+	case data.ImageUrl != "":
+		fileData, err := downloadURL(data.ImageUrl)
+		if err != nil {
+			return nil
+		}
+		uploaded, err := client.Upload(context.Background(), fileData, whatsmeow.MediaImage)
+		if err != nil {
+			return nil
+		}
+		return &waE2E.InteractiveMessage_Header{
+			HasMediaAttachment: proto.Bool(true),
+			Media: &waE2E.InteractiveMessage_Header_ImageMessage{
+				ImageMessage: &waE2E.ImageMessage{
+					URL:           proto.String(uploaded.URL),
+					DirectPath:    proto.String(uploaded.DirectPath),
+					MediaKey:      uploaded.MediaKey,
+					Mimetype:      proto.String("image/jpeg"),
+					FileEncSHA256: uploaded.FileEncSHA256,
+					FileSHA256:    uploaded.FileSHA256,
+					FileLength:    proto.Uint64(uint64(len(fileData))),
+				},
+			},
+		}
+	case data.VideoUrl != "":
+		fileData, err := downloadURL(data.VideoUrl)
+		if err != nil {
+			return nil
+		}
+		uploaded, err := client.Upload(context.Background(), fileData, whatsmeow.MediaVideo)
+		if err != nil {
+			return nil
+		}
+		return &waE2E.InteractiveMessage_Header{
+			HasMediaAttachment: proto.Bool(true),
+			Media: &waE2E.InteractiveMessage_Header_VideoMessage{
+				VideoMessage: &waE2E.VideoMessage{
+					URL:           proto.String(uploaded.URL),
+					DirectPath:    proto.String(uploaded.DirectPath),
+					MediaKey:      uploaded.MediaKey,
+					Mimetype:      proto.String("video/mp4"),
+					FileEncSHA256: uploaded.FileEncSHA256,
+					FileSHA256:    uploaded.FileSHA256,
+					FileLength:    proto.Uint64(uint64(len(fileData))),
+				},
+			},
+		}
+	}
+	return nil
+}
+
+// carouselCardHeader omite título/subtítulo vazios: string vazia faz o iPhone descartar o carrossel inteiro.
+func carouselCardHeader(h CarouselCardHeaderStruct) *waE2E.InteractiveMessage_Header {
+	header := &waE2E.InteractiveMessage_Header{HasMediaAttachment: proto.Bool(false)}
+	if h.Title != "" {
+		header.Title = proto.String(h.Title)
+	}
+	if h.Subtitle != "" {
+		header.Subtitle = proto.String(h.Subtitle)
+	}
+	return header
 }
